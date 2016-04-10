@@ -9,9 +9,11 @@ import tarfile
 from IPython.display import display, Image
 from scipy import ndimage
 from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import (brier_score_loss, precision_score, recall_score, f1_score)
 from six.moves.urllib.request import urlretrieve
 from six.moves import cPickle as pickle
-import cv2
+#import cv2
 
 url = 'http://commondatastorage.googleapis.com/books1000/'
 
@@ -24,7 +26,7 @@ def maybe_download(filename, expected_bytes, force=False):
     print('Found and verified', filename)
   else:
     raise Exception(
-      'Failed to verify ' + filename + '. Can you get to it with a browser?')
+            'Failed to verify ' + filename + '. Can you get to it with a browser?')
   return filename
 
 train_filename = maybe_download('notMNIST_large.tar.gz', 247336696)
@@ -50,8 +52,8 @@ def maybe_extract(filename, force=False):
     if os.path.isdir(os.path.join(root, d))]
   if len(data_folders) != num_classes:
     raise Exception(
-      'Expected %d folders, one per class. Found %d instead.' % (
-        num_classes, len(data_folders)))
+            'Expected %d folders, one per class. Found %d instead.' % (
+              num_classes, len(data_folders)))
   print(data_folders)
   return data_folders
 
@@ -66,7 +68,7 @@ def load_letter(folder, min_num_images):
   """Load the data for a single letter label."""
   image_files = os.listdir(folder)
   dataset = np.ndarray(shape=(len(image_files), image_size, image_size),
-                         dtype=np.float32)
+                       dtype=np.float32)
   print(folder)
   for image_index, image in enumerate(image_files):
     image_file = os.path.join(folder, image)
@@ -112,20 +114,185 @@ def maybe_pickle(data_folders, min_num_images_per_class, force=False):
 train_datasets = maybe_pickle(train_folders, 45000)
 test_datasets = maybe_pickle(test_folders, 1800)
 
+##Problem 2
 def show_samples_of_labels(sub_dir):
-    list_of_labels = os.listdir(sub_dir)
-    print(list_of_labels)
-    for label in list_of_labels:
-        cur_dir = os.path.join(sub_dir, label)
-        list_of_files = os.listdir(cur_dir)
-        ind = np.random.randint(0, len(list_of_files))
-        file_name = os.path.join(cur_dir, list_of_files[ind])
-        #img = cv2.imread(file_name)
-        print("Displaying: ", file_name)
-        #plt.figure()
-        #plt.imshow(img)
-        #plt.show()
-        Image(file_name)
+  list_of_labels = [x for x in os.listdir(sub_dir) if os.path.isdir(os.path.join(sub_dir, x))]
+
+  print(list_of_labels)
+  for label in list_of_labels:
+    cur_dir = os.path.join(sub_dir, label)
+    list_of_files = os.listdir(cur_dir)
+    ind = np.random.randint(0, len(list_of_files))
+    file_name = os.path.join(cur_dir, list_of_files[ind])
+    img = plt.imread(file_name)
+    print("Displaying: ", file_name)
+    #plt.figure()
+    #plt.imshow(img, interpolation='nearest', cmap='gray')
+    #plt.show()
+    #Image(file_name)
+  return list_of_labels
 
 dir_large = 'notMNIST_large'
-show_samples_of_labels(dir_large)
+list_of_labels = show_samples_of_labels(dir_large)
+
+
+##Problem 3 - check that the data set is balanced
+
+sub_dir = 'notMNIST_large'
+for label in list_of_labels:
+  cur_dir = os.path.join(sub_dir, label)
+  list_of_files = os.listdir(cur_dir)
+  print("Size of class ", label)
+  print(len(list_of_files))
+
+def make_arrays(nb_rows, img_size):
+  if nb_rows:
+    dataset = np.ndarray((nb_rows, img_size, img_size), dtype=np.float32)
+    labels = np.ndarray(nb_rows, dtype=np.int32)
+  else:
+    dataset, labels = None, None
+  return dataset, labels
+
+def merge_datasets(pickle_files, train_size, valid_size=0):
+  num_classes = len(pickle_files)
+  valid_dataset, valid_labels = make_arrays(valid_size, image_size)
+  train_dataset, train_labels = make_arrays(train_size, image_size)
+  vsize_per_class = valid_size // num_classes
+  tsize_per_class = train_size // num_classes
+
+  start_v, start_t = 0, 0
+  end_v, end_t = vsize_per_class, tsize_per_class
+  end_l = vsize_per_class+tsize_per_class
+  for label, pickle_file in enumerate(pickle_files):
+    try:
+      with open(pickle_file, 'rb') as f:
+        letter_set = pickle.load(f)
+        # let's shuffle the letters to have random validation and training set
+        np.random.shuffle(letter_set)
+        if valid_dataset is not None:
+          valid_letter = letter_set[:vsize_per_class, :, :]
+          valid_dataset[start_v:end_v, :, :] = valid_letter
+          valid_labels[start_v:end_v] = label
+          start_v += vsize_per_class
+          end_v += vsize_per_class
+
+        train_letter = letter_set[vsize_per_class:end_l, :, :]
+        train_dataset[start_t:end_t, :, :] = train_letter
+        train_labels[start_t:end_t] = label
+        start_t += tsize_per_class
+        end_t += tsize_per_class
+    except Exception as e:
+      print('Unable to process data from', pickle_file, ':', e)
+      raise
+
+  return valid_dataset, valid_labels, train_dataset, train_labels
+
+
+train_size = 200000
+valid_size = 10000
+test_size = 10000
+
+valid_dataset, valid_labels, train_dataset, train_labels = merge_datasets(
+        train_datasets, train_size, valid_size)
+_, _, test_dataset, test_labels = merge_datasets(test_datasets, test_size)
+
+print('Training:', train_dataset.shape, train_labels.shape)
+print('Validation:', valid_dataset.shape, valid_labels.shape)
+print('Testing:', test_dataset.shape, test_labels.shape)
+
+
+#Next, we'll randomize the data. It's important to have the labels well shuffled for the training and test distributions to match.
+def randomize(dataset, labels):
+  permutation = np.random.permutation(labels.shape[0])
+  shuffled_dataset = dataset[permutation,:,:]
+  shuffled_labels = labels[permutation]
+  return shuffled_dataset, shuffled_labels
+
+train_dataset, train_labels = randomize(train_dataset, train_labels)
+test_dataset, test_labels = randomize(test_dataset, test_labels)
+valid_dataset, valid_labels = randomize(valid_dataset, valid_labels)
+
+#Problem 4: Convince yourself that the data is still good after shuffling!
+dataset_size = train_dataset.shape[0]
+ind = np.random.randint(0, dataset_size)
+img = train_dataset[ind, :, :]
+img_label = train_labels[ind]
+plt.imshow(img, interpolation='nearest', cmap='gray')
+plt.title(img_label)
+#Finally, let's save the data for later reuse:
+
+pickle_file = 'notMNIST.pickle'
+
+try:
+  f = open(pickle_file, 'wb')
+  save = {
+    'train_dataset': train_dataset,
+    'train_labels': train_labels,
+    'valid_dataset': valid_dataset,
+    'valid_labels': valid_labels,
+    'test_dataset': test_dataset,
+    'test_labels': test_labels,
+  }
+  pickle.dump(save, f, pickle.HIGHEST_PROTOCOL)
+  f.close()
+except Exception as e:
+  print('Unable to save data to', pickle_file, ':', e)
+  raise
+
+statinfo = os.stat(pickle_file)
+print('Compressed pickle size:', statinfo.st_size)
+
+print('Problem 5')
+'''
+Problem 5
+By construction, this dataset might contain a lot of overlapping samples, including training data that's also contained
+in the validation and test set! Overlap between training and test can skew the results if you expect to use your model
+in an environment where there is never an overlap, but are actually ok if you expect to see training samples recur when
+you use it. Measure how much overlap there is between training, validation and test samples.
+
+Optional questions:
+What about near duplicates between datasets? (images that are almost identical)
+Create a sanitized validation and test set, and compare your accuracy on those in subsequent assignments.
+
+Ans: Maybe try kNN to solve this problem
+'''
+#knn = KNeighborsClassifier()
+
+print('Problem 6')
+'''
+Problem 6
+Let's get an idea of what an off-the-shelf classifier can give you on this data. It's always good to check that there is
+something to learn, and that it's a problem that is not so trivial that a canned solution solves it.
+Train a simple model on this data using 50, 100, 1000 and 5000 training samples.
+Hint: you can use the LogisticRegression model from sklearn.linear_model.
+
+Optional question: train an off-the-shelf model on all the data!
+'''
+
+def flatten_dataset(dataset):
+  shape = dataset.shape
+  X = dataset.reshape((shape[0], shape[1]*shape[2]))
+  return X
+
+#reshape data sets
+X_train = flatten_dataset(train_dataset)
+X_valid = flatten_dataset(valid_dataset)
+X_test = flatten_dataset(test_dataset)
+
+#train using out of box trainer
+logreg = LogisticRegression(C=1e5)
+logreg.fit(X_train, train_labels)
+y_pred = logreg.predict(X_test)
+
+print('LogisticRegression score: %f' % logreg.score(X_valid, valid_labels))
+
+#Check different parameters on validation set
+
+
+#After taking best hyper parameter check on test set
+
+
+
+
+
+
